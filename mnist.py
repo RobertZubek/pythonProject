@@ -1,23 +1,19 @@
 import time
+import unittest
 import matplotlib.pyplot as plt
-from tqdm import tqdm
 from sklearn.cluster import DBSCAN
 from sklearn.datasets import fetch_openml
 from sklearn.decomposition import PCA
-from sklearn.metrics import accuracy_score
+from sklearn.metrics import accuracy_score, adjusted_rand_score
 import numpy as np
-from collections import Counter
-
+from scipy.stats import mode
+from tqdm import tqdm
 
 def dbscan(data, eps, min_pts):
-    """DBSCAN clustering algorithm implemented without additional libraries."""
-
     def euclidean_distance(p1, p2):
-        """Calculate the Euclidean distance between two points."""
-        return np.sqrt(np.sum((np.array(p1) - np.array(p2)) ** 2))
+        return sum((p1[i] - p2[i]) ** 2 for i in range(len(p1))) ** 0.5
 
     def region_query(point):
-        """Find all neighbors within `eps` distance of a given point."""
         neighbors = []
         for idx, other_point in enumerate(data):
             if euclidean_distance(point, other_point) <= eps:
@@ -25,66 +21,40 @@ def dbscan(data, eps, min_pts):
         return neighbors
 
     def expand_cluster(point_idx, neighbors, cluster_id):
-        """Expand the cluster recursively from a core point."""
         clusters[point_idx] = cluster_id
         i = 0
         while i < len(neighbors):
             neighbor_idx = neighbors[i]
 
-            if clusters[neighbor_idx] == -1:  # Previously marked as noise, now part of the cluster
+            if clusters[neighbor_idx] == -1:
                 clusters[neighbor_idx] = cluster_id
 
-            elif clusters[neighbor_idx] == 0:  # Not yet processed
+            elif clusters[neighbor_idx] == 0:
                 clusters[neighbor_idx] = cluster_id
                 new_neighbors = region_query(data[neighbor_idx])
                 if len(new_neighbors) >= min_pts:
-                    neighbors.extend(new_neighbors)  # Expand with new core's neighbors
+                    neighbors.extend(new_neighbors)
 
             i += 1
 
-    # Initialize cluster labels (-1: noise, 0: unvisited)
     clusters = [0] * len(data)
     cluster_id = 0
 
-    for point_idx, point in tqdm(enumerate(data), total=len(data), desc="Custom DBSCAN Progress"):
-        if clusters[point_idx] != 0:  # Already visited
+    for point_idx, point in enumerate(tqdm(data)):
+        if clusters[point_idx] != 0:
             continue
 
         neighbors = region_query(point)
 
         if len(neighbors) < min_pts:
-            clusters[point_idx] = -1  # Mark as noise
+            clusters[point_idx] = -1
         else:
-            cluster_id += 1  # Start a new cluster
+            cluster_id += 1
             expand_cluster(point_idx, neighbors, cluster_id)
 
     return clusters
 
-
-def assign_cluster_labels(clusters, true_labels):
-    """Assign the most frequent true label to each cluster."""
-    cluster_labels = [-1] * len(clusters)  # Initialize with -1 (default as noise)
-
-    # Get the most frequent true label for each cluster
-    cluster_map = {}
-    for idx, cluster in enumerate(clusters):
-        if cluster != -1:  # Ignore noise points
-            if cluster not in cluster_map:
-                cluster_map[cluster] = []
-            cluster_map[cluster].append(true_labels[idx])
-
-    # Assign the most frequent true label to each cluster
-    for cluster, points in cluster_map.items():
-        most_frequent_label = Counter(points).most_common(1)[0][0]
-        for idx in range(len(clusters)):
-            if clusters[idx] == cluster:
-                cluster_labels[idx] = most_frequent_label
-
-    return cluster_labels
-
-
 def plot_clusters(data, labels, title):
-    """Visualize clustering results."""
     colors = ['red', 'green', 'blue', 'yellow', 'purple', 'orange', 'brown', 'pink', 'gray', 'cyan']
     for idx, point in enumerate(data):
         plt.scatter(point[0], point[1], color=colors[labels[idx] % len(colors)] if labels[idx] != -1 else 'black', s=10)
@@ -92,86 +62,103 @@ def plot_clusters(data, labels, title):
     plt.xlabel('X')
     plt.ylabel('Y')
 
+def map_clusters_to_labels(cluster_labels, true_labels):
+    unique_clusters = set(cluster_labels)
+    cluster_to_label = {}
 
-# Load MNIST dataset
+    for cluster in unique_clusters:
+        if cluster == -1:
+            continue
+
+        indices = [i for i, label in enumerate(cluster_labels) if label == cluster]
+        true_labels_in_cluster = true_labels[indices]
+
+        if len(true_labels_in_cluster) > 0:
+            most_common_label = mode(true_labels_in_cluster, keepdims=True).mode[0]
+            cluster_to_label[cluster] = most_common_label
+        else:
+            cluster_to_label[cluster] = -1
+
+    predicted_labels = [cluster_to_label[label] if label in cluster_to_label else -1 for label in cluster_labels]
+    return predicted_labels
+
 mnist = fetch_openml('mnist_784', version=1)
-data = mnist.data / 255.0
+data = mnist.data
 labels = mnist.target.astype(int)
 
-# Use PCA to reduce dimensionality for visualization and clustering
 pca = PCA(n_components=2)
 data_2d = pca.fit_transform(data)
 
-# DBSCAN parameters
-epsilon = 5.0
-min_points = 10
-
-# Subset sizes for comparison
-subset_sizes = [100, 500, 1000, 2000, 5000]
+sizes = [100, 1000, 2000, 3000]
 custom_times = []
 sklearn_times = []
-custom_accuracies = []
-sklearn_accuracies = []
+custom_metrics = []
+sklearn_metrics = []
 
-for subset_size in subset_sizes:
-    subset_data = data_2d[:subset_size]
-    subset_labels = labels[:subset_size]
+for size in sizes:
+    data_points = data_2d[:size]
+    true_labels = labels[:size]
 
-    # Measure time for custom implementation
+    distances = np.sort(np.linalg.norm(data_points[:, np.newaxis] - data_points, axis=2), axis=1)[:, 1]
+    epsilon = np.percentile(distances, 95)
+    min_points = 10
+
     start_time = time.time()
-    cluster_labels_custom = dbscan(subset_data, epsilon, min_points)
-    custom_times.append(time.time() - start_time)
+    cluster_labels_custom = dbscan(data_points, epsilon, min_points)
+    custom_time = time.time() - start_time
+    custom_times.append(custom_time)
 
-    # Assign labels for custom DBSCAN
-    custom_pred_labels = assign_cluster_labels(cluster_labels_custom, subset_labels)
-    custom_accuracy = accuracy_score(subset_labels, custom_pred_labels)
-    custom_accuracies.append(custom_accuracy)
-
-    # Measure time for scikit-learn implementation
     start_time = time.time()
     sklearn_dbscan = DBSCAN(eps=epsilon, min_samples=min_points)
-    sklearn_labels = sklearn_dbscan.fit_predict(subset_data)
-    sklearn_times.append(time.time() - start_time)
+    sklearn_labels = sklearn_dbscan.fit_predict(data_points)
+    sklearn_time = time.time() - start_time
+    sklearn_times.append(sklearn_time)
 
-    # Assign labels for scikit-learn DBSCAN
-    sklearn_pred_labels = assign_cluster_labels(sklearn_labels, subset_labels)
-    sklearn_accuracy = accuracy_score(subset_labels, sklearn_pred_labels)
-    sklearn_accuracies.append(sklearn_accuracy)
+    predicted_labels_custom = map_clusters_to_labels(cluster_labels_custom, true_labels)
+    predicted_labels_sklearn = map_clusters_to_labels(sklearn_labels, true_labels)
 
-    # Print timing and accuracy results
-    print(f"Subset Size: {subset_size}")
-    print(f"Custom DBSCAN Time: {custom_times[-1]:.4f} seconds")
-    print(f"Scikit-learn DBSCAN Time: {sklearn_times[-1]:.4f} seconds")
-    print(f"Custom DBSCAN Accuracy: {custom_accuracies[-1]:.4f}")
-    print(f"Scikit-learn DBSCAN Accuracy: {sklearn_accuracies[-1]:.4f}\n")
+    custom_accuracy = accuracy_score(true_labels, predicted_labels_custom)
+    sklearn_accuracy = accuracy_score(true_labels, predicted_labels_sklearn)
 
-# Plot execution time comparison
+    custom_ari = adjusted_rand_score(true_labels, cluster_labels_custom)
+    sklearn_ari = adjusted_rand_score(true_labels, sklearn_labels)
+
+    custom_metrics.append((custom_accuracy, custom_ari))
+    sklearn_metrics.append((sklearn_accuracy, sklearn_ari))
+
+    plt.figure(figsize=(12, 6))
+    plt.subplot(1, 2, 1)
+    plot_clusters(data_points, cluster_labels_custom, f"Custom DBSCAN (Size: {size})")
+    plt.subplot(1, 2, 2)
+    plot_clusters(data_points, sklearn_labels, f"Scikit-learn DBSCAN (Size: {size})")
+    plt.tight_layout()
+    plt.show()
+
 plt.figure(figsize=(10, 6))
-plt.plot(subset_sizes, custom_times, label="Custom DBSCAN", marker='o')
-plt.plot(subset_sizes, sklearn_times, label="Scikit-learn DBSCAN", marker='s')
-plt.xlabel("Subset Size")
-plt.ylabel("Execution Time (seconds)")
-plt.title("Execution Time vs Subset Size")
+plt.plot(sizes, custom_times, label="Custom DBSCAN Time", marker='o')
+plt.plot(sizes, sklearn_times, label="Scikit-learn DBSCAN Time", marker='x')
+plt.xlabel("Number of Points")
+plt.ylabel("Execution Time (s)")
+plt.title("Execution Time vs Number of Points")
 plt.legend()
-plt.grid()
+plt.grid(True)
 plt.show()
 
-# Plot accuracy comparison
-plt.figure(figsize=(10, 6))
-plt.plot(subset_sizes, custom_accuracies, label="Custom DBSCAN Accuracy", marker='o')
-plt.plot(subset_sizes, sklearn_accuracies, label="Scikit-learn DBSCAN Accuracy", marker='s')
-plt.xlabel("Subset Size")
-plt.ylabel("Accuracy")
-plt.title("Accuracy vs Subset Size")
-plt.legend()
-plt.grid()
-plt.show()
+class TestDBSCAN(unittest.TestCase):
+    def test_cluster_count(self):
+        test_data = np.array([[1, 1], [2, 2], [3, 3], [10, 10], [11, 11], [12, 12]])
+        clusters = dbscan(test_data, eps=2.0, min_pts=2)
+        self.assertEqual(len(set(clusters)) - (1 if -1 in clusters else 0), 2)
 
-# Plot clustering results for the largest subset
-plt.figure(figsize=(12, 6))
-plt.subplot(1, 2, 1)
-plot_clusters(data_2d[:subset_sizes[-1]], custom_pred_labels, "Custom DBSCAN (Largest Subset)")
-plt.subplot(1, 2, 2)
-plot_clusters(data_2d[:subset_sizes[-1]], sklearn_pred_labels, "Scikit-learn DBSCAN (Largest Subset)")
-plt.tight_layout()
-plt.show()
+    def test_noise_points(self):
+        test_data = np.array([[1, 1], [10, 10], [20, 20]])
+        clusters = dbscan(test_data, eps=1.0, min_pts=2)
+        self.assertTrue(all(label == -1 for label in clusters))
+
+    def test_single_cluster(self):
+        test_data = np.array([[1, 1], [2, 2], [3, 3], [4, 4], [5, 5]])
+        clusters = dbscan(test_data, eps=2.0, min_pts=2)
+        self.assertEqual(len(set(clusters)) - (1 if -1 in clusters else 0), 1)
+
+if __name__ == "__main__":
+    unittest.main()
